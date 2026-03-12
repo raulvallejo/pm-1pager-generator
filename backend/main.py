@@ -45,7 +45,6 @@ app.add_middleware(
 # probe works without any prefix.
 # ---------------------------------------------------------------------------
 router = APIRouter(prefix="/api")
-app.include_router(router)
 
 # ---------------------------------------------------------------------------
 # Claude client via LangChain
@@ -637,3 +636,9 @@ def test():
 @app.get("/api/chat/test")
 def chat_test():
     return {"message": "chat route exists", "version": "sprint5"}
+
+
+# Must come AFTER all @router.post/@router.get definitions above.
+# include_router snapshots the router's route list at call time —
+# any routes defined after this line would be silently ignored.
+app.include_router(router)
