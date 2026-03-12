@@ -34,11 +34,38 @@ body {
   padding: 1rem 1.5rem;
   background: #fff;
   border-bottom: 1px solid #e0e0e0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .app-header h1 {
   font-size: 1.25rem;
   font-weight: 600;
+}
+
+/* "New Initiative" button in the header */
+.new-initiative-btn {
+  padding: 0.4rem 0.9rem;
+  background: transparent;
+  color: #2563eb;
+  border: 1px solid #2563eb;
+  border-radius: 0.4rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.new-initiative-btn:hover:not(:disabled) {
+  background: #2563eb;
+  color: #fff;
+}
+
+.new-initiative-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .app-main {
@@ -102,6 +129,26 @@ body {
   background: #fff;
   border: 1px solid #e0e0e0;
   border-bottom-left-radius: 0.25rem;
+}
+
+/* Final 1-pager document bubble — full width, distinct background */
+.message--document {
+  max-width: 100%;
+  align-self: stretch;
+}
+
+.message--document .message__label {
+  color: #059669;
+  font-size: 0.75rem;
+}
+
+.message--document .message__text {
+  background: #f0fdf4;
+  border: 1px solid #6ee7b7;
+  border-radius: 0.75rem;
+  font-family: "Courier New", Courier, monospace;
+  font-size: 0.88rem;
+  line-height: 1.7;
 }
 
 .typing-indicator {
