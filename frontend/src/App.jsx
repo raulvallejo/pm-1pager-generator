@@ -14,7 +14,9 @@ import { chatWithAgent, triggerResearch } from "./api/client";
 // knows which conversation history to look up and append to.
 // ---------------------------------------------------------------------------
 
-// A "message" object shape: { role: "user" | "assistant", text: string, isDocument?: boolean }
+// A "message" object shape:
+// { role: "user"|"assistant", text: string, isDocument?: boolean, sessionId?: string }
+// sessionId is set on document messages so Message.jsx can call /download/* endpoints.
 
 export default function App() {
   // Generate a new UUID on first render; changing this starts a new session.
@@ -55,13 +57,15 @@ export default function App() {
         const { reply: docReply, isComplete: docComplete } = await triggerResearch(sessionId);
         setMessages((prev) => [
           ...prev,
-          { role: "assistant", text: docReply, isDocument: docComplete },
+          // Include sessionId so the download buttons in Message.jsx know
+          // which session to request the file for.
+          { role: "assistant", text: docReply, isDocument: docComplete, sessionId },
         ]);
       } else {
         // 3c. Normal clarifying question or direct 1-pager.
         setMessages((prev) => [
           ...prev,
-          { role: "assistant", text: reply, isDocument: isComplete },
+          { role: "assistant", text: reply, isDocument: isComplete, sessionId: isComplete ? sessionId : undefined },
         ]);
       }
     } catch (err) {

@@ -18,7 +18,7 @@ export default function ChatWindow({ messages, isLoading }) {
   return (
     <div className="chat-window">
       {messages.map((msg, index) => (
-        <Message key={index} role={msg.role} text={msg.text} isDocument={msg.isDocument} />
+        <Message key={index} role={msg.role} text={msg.text} isDocument={msg.isDocument} sessionId={msg.sessionId} />
       ))}
 
       {/* Typing indicator shown while waiting for the backend */}

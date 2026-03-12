@@ -1,14 +1,25 @@
 import os
+import io
+import html
 import time
 import json
 import uuid
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from tavily import TavilyClient
+from docx import Document
+from docx.shared import Pt, RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import cm
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 
 # ---------------------------------------------------------------------------
 # Load environment variables from backend/.env
@@ -74,6 +85,11 @@ def invoke_with_backoff(messages: list) -> str:
 # ---------------------------------------------------------------------------
 sessions: dict[str, list[dict]] = {}
 session_research: dict[str, str] = {}
+
+# session_documents stores the raw 1-pager markdown text per session.
+# Populated whenever a completed 1-pager is returned (from /chat or /research).
+# The /download/* endpoints read from here to generate files.
+session_documents: dict[str, str] = {}
 
 # ---------------------------------------------------------------------------
 # System prompt
@@ -158,6 +174,160 @@ def build_lc_messages(history: list) -> list:
         else:
             result.append(AIMessage(content=msg["content"]))
     return result
+
+
+# ---------------------------------------------------------------------------
+# Helper: parse the 1-pager markdown into a structured dict
+#
+# The 1-pager always follows the format:
+#   ---
+#   ## PM 1-Pager: Title
+#   ### Section Name
+#   content...
+#   ---
+#
+# Returns: { "title": str, "sections": [{"heading": str, "content": str}] }
+#
+# Both generate_docx and generate_pdf call this so the parsing logic lives
+# in one place — change the format here and both output types update.
+# ---------------------------------------------------------------------------
+def parse_1pager(text: str) -> dict:
+    lines = text.strip().split("\n")
+    # Strip leading and trailing "---" delimiter lines
+    if lines and lines[0].strip() == "---":
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "---":
+        lines = lines[:-1]
+
+    result = {"title": "PM 1-Pager", "sections": []}
+    current_heading = None
+    current_content: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            result["title"] = stripped[3:].strip()
+        elif stripped.startswith("### "):
+            # Save the previous section before starting the new one
+            if current_heading is not None:
+                result["sections"].append({
+                    "heading": current_heading,
+                    "content": "\n".join(current_content).strip(),
+                })
+            current_heading = stripped[4:].strip()
+            current_content = []
+        else:
+            if current_heading is not None:
+                current_content.append(line)
+
+    # Don't forget the last section
+    if current_heading is not None:
+        result["sections"].append({
+            "heading": current_heading,
+            "content": "\n".join(current_content).strip(),
+        })
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Helper: generate a .docx file from parsed 1-pager data
+#
+# python-docx builds Word documents programmatically:
+#   - add_heading(text, level=1) → large bold heading (maps to Word's H1/H2)
+#   - add_paragraph(text)        → normal body text
+#   - doc.save(buffer)           → writes the .docx bytes into the buffer
+#
+# We use an io.BytesIO buffer so the file never touches disk — the bytes
+# go straight into the HTTP response.
+# ---------------------------------------------------------------------------
+def generate_docx(parsed: dict) -> bytes:
+    doc = Document()
+
+    # Title — Heading 1
+    title_para = doc.add_heading(parsed["title"], level=1)
+    title_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+    for section in parsed["sections"]:
+        # Section header — Heading 2
+        doc.add_heading(section["heading"], level=2)
+        # Section body — Normal paragraph
+        # Add a paragraph per non-empty line so spacing looks clean
+        for line in section["content"].split("\n"):
+            if line.strip():
+                doc.add_paragraph(line.strip())
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Helper: generate a .pdf file from parsed 1-pager data
+#
+# reportlab builds PDFs from a "story" — a list of flowable objects
+# (Paragraph, Spacer, etc.) that are laid out top-to-bottom on the page.
+#
+# Key concepts:
+#   ParagraphStyle — defines font, size, spacing for a class of text
+#   Paragraph(text, style) — a block of styled text; accepts basic HTML tags
+#   Spacer(width, height)  — blank vertical space between elements
+#   SimpleDocTemplate.build(story) — renders the story to the buffer
+#
+# We call html.escape() on all user-supplied content because reportlab
+# parses Paragraph text as XML — unescaped < > & would crash the build.
+# ---------------------------------------------------------------------------
+def generate_pdf(parsed: dict) -> bytes:
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        rightMargin=2.5 * cm,
+        leftMargin=2.5 * cm,
+        topMargin=2.5 * cm,
+        bottomMargin=2.5 * cm,
+    )
+
+    base_styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        "DocTitle",
+        parent=base_styles["Title"],
+        fontSize=20,
+        textColor=colors.HexColor("#1a1a1a"),
+        spaceAfter=16,
+    )
+    heading_style = ParagraphStyle(
+        "DocHeading",
+        parent=base_styles["Heading2"],
+        fontSize=13,
+        textColor=colors.HexColor("#2563eb"),
+        spaceBefore=14,
+        spaceAfter=4,
+    )
+    body_style = ParagraphStyle(
+        "DocBody",
+        parent=base_styles["Normal"],
+        fontSize=11,
+        leading=17,
+        textColor=colors.HexColor("#1a1a1a"),
+        spaceAfter=4,
+    )
+
+    story = []
+    story.append(Paragraph(html.escape(parsed["title"]), title_style))
+    story.append(Spacer(1, 0.3 * cm))
+
+    for section in parsed["sections"]:
+        story.append(Paragraph(html.escape(section["heading"]), heading_style))
+        for line in section["content"].split("\n"):
+            if line.strip():
+                story.append(Paragraph(html.escape(line.strip()), body_style))
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -287,10 +457,14 @@ def chat(request: ChatRequest):
 
     # 5. Normal question turn — store reply and return
     history.append({"role": "assistant", "content": reply})
+    is_complete = reply.strip().startswith("---")
+    # Cache 1-pager text so /download/* endpoints can retrieve it later
+    if is_complete:
+        session_documents[request.session_id] = reply
     return ChatResponse(
         reply=reply,
         session_id=request.session_id,
-        is_complete=reply.strip().startswith("---"),
+        is_complete=is_complete,
         is_researching=False,
     )
 
@@ -352,13 +526,66 @@ def research(request: ResearchRequest):
             raise HTTPException(status_code=429, detail="Anthropic rate limit hit.")
         raise HTTPException(status_code=503, detail=f"Could not reach Anthropic API: {e}")
 
-    # 5. Append the final 1-pager to history
+    # 5. Append the final 1-pager to history and cache it for downloads
     history.append({"role": "assistant", "content": reply})
+    session_documents[request.session_id] = reply
 
     return ResearchResponse(
         reply=reply,
         session_id=request.session_id,
         is_complete=reply.strip().startswith("---"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Download endpoints (Sprint 4)
+#
+# Both endpoints follow the same pattern:
+#   1. Look up the cached 1-pager text for the session.
+#   2. Parse it into sections with parse_1pager().
+#   3. Generate the file bytes in memory (no disk I/O).
+#   4. Return a StreamingResponse with the correct MIME type and a
+#      Content-Disposition header so the browser triggers a file download.
+#
+# Content-Disposition: attachment; filename="..." tells the browser to save
+# the response as a file rather than trying to display it inline.
+# ---------------------------------------------------------------------------
+class DownloadRequest(BaseModel):
+    session_id: str
+
+
+@app.post("/download/docx")
+def download_docx(request: DownloadRequest):
+    if request.session_id not in session_documents:
+        raise HTTPException(
+            status_code=404,
+            detail="No 1-pager found for this session. Generate one first.",
+        )
+    parsed = parse_1pager(session_documents[request.session_id])
+    docx_bytes = generate_docx(parsed)
+    # Derive a clean filename from the initiative title
+    safe_name = parsed["title"].replace(" ", "_").replace("/", "-")[:60]
+    return StreamingResponse(
+        io.BytesIO(docx_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}.docx"'},
+    )
+
+
+@app.post("/download/pdf")
+def download_pdf(request: DownloadRequest):
+    if request.session_id not in session_documents:
+        raise HTTPException(
+            status_code=404,
+            detail="No 1-pager found for this session. Generate one first.",
+        )
+    parsed = parse_1pager(session_documents[request.session_id])
+    pdf_bytes = generate_pdf(parsed)
+    safe_name = parsed["title"].replace(" ", "_").replace("/", "-")[:60]
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}.pdf"'},
     )
 
 

@@ -151,6 +151,56 @@ body {
   line-height: 1.7;
 }
 
+/* ── Download buttons ────────────────────────────────────────────────────── */
+.download-buttons {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.download-btn {
+  padding: 0.45rem 1rem;
+  border: none;
+  border-radius: 0.4rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+  white-space: nowrap;
+}
+
+.download-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.download-btn--docx {
+  background: #2563eb;
+  color: #fff;
+}
+
+.download-btn--docx:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+
+.download-btn--pdf {
+  background: #059669;
+  color: #fff;
+}
+
+.download-btn--pdf:hover:not(:disabled) {
+  background: #047857;
+}
+
+.download-error {
+  width: 100%;
+  font-size: 0.8rem;
+  color: #dc2626;
+  margin: 0.25rem 0 0;
+}
+
 .typing-indicator {
   color: #888;
   font-style: italic;

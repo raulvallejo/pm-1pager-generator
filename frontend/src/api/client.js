@@ -75,6 +75,46 @@ export async function triggerResearch(sessionId) {
 }
 
 /**
+ * Sprint 4: download the 1-pager as a Word doc or PDF.
+ *
+ * How browser file downloads work via fetch:
+ *   1. POST to the backend — it returns raw binary bytes (not JSON).
+ *   2. response.blob() reads those bytes into a Blob object.
+ *   3. URL.createObjectURL(blob) creates a temporary in-browser URL for it.
+ *   4. We create a hidden <a> tag pointing to that URL with a `download`
+ *      attribute, click it programmatically, then clean up.
+ *
+ * @param {string} sessionId
+ * @param {"docx"|"pdf"} format
+ */
+export async function downloadDoc(sessionId, format) {
+  const response = await fetch(`${BASE_URL}/api/download/${format}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+
+  if (!response.ok) {
+    let detail = `Download failed (${response.status})`;
+    try {
+      const err = await response.json();
+      if (err.detail) detail = err.detail;
+    } catch (_) {}
+    throw new Error(detail);
+  }
+
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `pm-1pager.${format}`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url); // free the temporary URL from browser memory
+}
+
+/**
  * Sprint 1 legacy function — kept so the old /generate path still compiles.
  * The app now uses chatWithAgent instead.
  */
