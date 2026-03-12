@@ -11,7 +11,8 @@ export default defineConfig({
       "/api": {
         target: "http://localhost:8000",
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, ""),
+        // No rewrite — backend now has /api prefix on all routes,
+        // so /api/chat proxies to localhost:8000/api/chat as-is.
       },
     },
   },

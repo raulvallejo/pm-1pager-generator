@@ -4,7 +4,7 @@ import html
 import time
 import json
 import uuid
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -35,6 +35,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------------------------
+# API router
+#
+# All functional endpoints are mounted under /api so the frontend's
+# production calls (e.g. https://…onrender.com/api/chat) match exactly.
+# The health check stays on `app` directly at GET / so Render's health
+# probe works without any prefix.
+# ---------------------------------------------------------------------------
+router = APIRouter(prefix="/api")
+app.include_router(router)
 
 # ---------------------------------------------------------------------------
 # Claude client via LangChain
@@ -419,7 +430,7 @@ class ResearchResponse(BaseModel):
 #   - The frontend sees is_researching=True, shows "Researching..." in the
 #     chat, and immediately fires a POST /research call.
 # ---------------------------------------------------------------------------
-@app.post("/chat", response_model=ChatResponse)
+@router.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
     # 1. Get or create session history
     if request.session_id not in sessions:
@@ -487,7 +498,7 @@ def chat(request: ChatRequest):
 #   the conversation — Claude treats it as the final piece of input before
 #   generating the document.
 # ---------------------------------------------------------------------------
-@app.post("/research", response_model=ResearchResponse)
+@router.post("/research", response_model=ResearchResponse)
 def research(request: ResearchRequest):
     if request.session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found. Start a conversation first.")
@@ -554,7 +565,7 @@ class DownloadRequest(BaseModel):
     session_id: str
 
 
-@app.post("/download/docx")
+@router.post("/download/docx")
 def download_docx(request: DownloadRequest):
     if request.session_id not in session_documents:
         raise HTTPException(
@@ -572,7 +583,7 @@ def download_docx(request: DownloadRequest):
     )
 
 
-@app.post("/download/pdf")
+@router.post("/download/pdf")
 def download_pdf(request: DownloadRequest):
     if request.session_id not in session_documents:
         raise HTTPException(
@@ -600,7 +611,7 @@ class GenerateResponse(BaseModel):
     reply: str
 
 
-@app.post("/generate", response_model=GenerateResponse)
+@router.post("/generate", response_model=GenerateResponse)
 def generate(request: GenerateRequest):
     """Sprint 1 mock endpoint — still works but /chat is the real one now."""
     mock_reply = (
