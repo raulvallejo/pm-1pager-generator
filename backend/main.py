@@ -632,3 +632,8 @@ def health_check():
 @app.get("/api/test")
 def test():
     return {"message": "api prefix working", "version": "sprint5"}
+
+
+@app.get("/api/chat/test")
+def chat_test():
+    return {"message": "chat route exists", "version": "sprint5"}
