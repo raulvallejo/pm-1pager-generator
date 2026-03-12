@@ -20,12 +20,33 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+import opik
+from opik import opik_context
 
 # ---------------------------------------------------------------------------
 # Load environment variables from backend/.env
-# Makes ANTHROPIC_API_KEY and TAVILY_API_KEY available via os.environ.
+# Makes ANTHROPIC_API_KEY, TAVILY_API_KEY, and OPIK_API_KEY available.
 # ---------------------------------------------------------------------------
 load_dotenv()
+
+# ---------------------------------------------------------------------------
+# OPIK observability (Sprint 6)
+#
+# opik.configure() sets the API key and project name globally for the process.
+# After this call, every @opik.track decorator in this file will send traces
+# to the OPIK Cloud project named by OPIK_PROJECT_NAME.
+#
+# If OPIK_API_KEY is missing the configure() call raises — we catch it so
+# the app still starts and all existing functionality keeps working; tracing
+# just becomes a no-op.
+# ---------------------------------------------------------------------------
+try:
+    opik.configure(
+        api_key=os.getenv("OPIK_API_KEY", ""),
+        project_name=os.getenv("OPIK_PROJECT_NAME", "pm-1pager-generator"),
+    )
+except Exception:
+    pass  # OPIK is optional — missing key degrades gracefully
 
 app = FastAPI(title="PM 1-Pager Generator API")
 
@@ -341,6 +362,54 @@ def generate_pdf(parsed: dict) -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# Helper: rule-based eval scoring for the generated 1-pager
+#
+# Returns a dict of three scores, each 0.0–1.0:
+#
+#   completeness   — fraction of the 6 required sections present.
+#                    1.0 = all sections exist, 0.0 = empty document.
+#
+#   research_usage — 1.0 if the Market Context section has substantial
+#                    content (>50 chars), meaning Claude actually used the
+#                    Tavily research data. 0.0 if the section is missing
+#                    or nearly empty.
+#
+#   clarity        — grades the Problem Statement on length as a proxy for
+#                    specificity: 1.0 ≥100 chars, 0.5 ≥30 chars, 0.0 otherwise.
+#
+# These scores are logged to OPIK as feedback on the 1pager_generation span,
+# giving you a per-trace quality signal visible in the OPIK dashboard.
+# ---------------------------------------------------------------------------
+def score_1pager(text: str) -> dict[str, float]:
+    parsed = parse_1pager(text)
+    sections = {s["heading"]: s["content"] for s in parsed["sections"]}
+
+    required_sections = {
+        "Problem Statement", "Target User", "Proposed Solution",
+        "Key Metrics", "Market Context", "Risks & Assumptions",
+    }
+    present = sum(1 for h in required_sections if h in sections)
+    completeness = round(present / len(required_sections), 2)
+
+    market_content = sections.get("Market Context", "")
+    research_usage = 1.0 if len(market_content) > 50 else 0.0
+
+    problem_content = sections.get("Problem Statement", "")
+    if len(problem_content) >= 100:
+        clarity = 1.0
+    elif len(problem_content) >= 30:
+        clarity = 0.5
+    else:
+        clarity = 0.0
+
+    return {
+        "completeness": completeness,
+        "research_usage": research_usage,
+        "clarity": clarity,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Helper: run Tavily market research for a session
 #
 # Flow:
@@ -395,6 +464,132 @@ def research_initiative(session_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# OPIK-tracked functions (Sprint 6)
+#
+# Each function below is a thin wrapper around existing logic. Decorating
+# them with @opik.track is the ONLY change — the business logic inside is
+# identical to what was inline in the endpoints before.
+#
+# HOW NESTING WORKS:
+#   @opik.track uses Python's threading.local() to track the "current trace".
+#   When generate_1pager_pipeline() calls track_web_research(), OPIK sees
+#   an active parent trace and automatically makes the inner call a child span.
+#   You get a single trace in the dashboard with a timeline like:
+#
+#     generate_1pager_pipeline  ──────────────────────────────────
+#       track_web_research        ───────────
+#       track_1pager_generation             ──────────────────────
+#
+# HOW TIMING WORKS:
+#   @opik.track records wall-clock start and end times for each decorated
+#   function automatically. No manual timing code is needed.
+#
+# HOW INPUTS/OUTPUTS ARE RECORDED:
+#   OPIK captures the function's arguments as "input" and the return value
+#   as "output" for each span. This is automatic — no extra code needed.
+# ---------------------------------------------------------------------------
+
+@opik.track(name="clarification_questions")
+def track_clarification(session_id: str, message: str, history: list) -> str:
+    """
+    Span: one clarification question turn.
+
+    Called once per /chat request during the Q&A phase. Creates its own
+    trace in OPIK (not a child of generate_1pager_pipeline) because each
+    clarification is a separate HTTP request with no shared parent context.
+
+    Input recorded by OPIK: session_id, message, history length.
+    Output recorded: Claude's clarifying question text.
+    """
+    lc_messages = [SystemMessage(content=SYSTEM_PROMPT)] + build_lc_messages(history)
+    return invoke_with_backoff(lc_messages)
+
+
+@opik.track(name="web_research")
+def track_web_research(session_id: str) -> str:
+    """
+    Span: Tavily market research.
+
+    Child span of generate_1pager_pipeline. Wraps research_initiative()
+    so OPIK records how long the 3 Tavily searches took and what they returned.
+
+    Input recorded: session_id.
+    Output recorded: full formatted research summary string.
+    """
+    return research_initiative(session_id)
+
+
+@opik.track(name="1pager_generation")
+def track_1pager_generation(session_id: str, history: list, research_summary: str) -> str:
+    """
+    Span: Claude generates the final 1-pager, then we score it.
+
+    Child span of generate_1pager_pipeline. After Claude responds, we run
+    score_1pager() and log the three scores as feedback on THIS span using
+    opik_context.update_current_span(). The scores appear in OPIK's UI
+    alongside the span's input/output and timing.
+
+    Input recorded: session_id, history length, research_summary.
+    Output recorded: the full 1-pager markdown text.
+    """
+    lc_messages = [SystemMessage(content=SYSTEM_PROMPT)]
+    lc_messages.extend(build_lc_messages(history))
+    lc_messages.append(HumanMessage(content=(
+        f"Research complete. Here is the market context to use when writing "
+        f"the Market Context section of the 1-pager:\n\n"
+        f"{research_summary}\n\n"
+        f"Now generate the PM 1-pager."
+    )))
+    reply = invoke_with_backoff(lc_messages)
+
+    # Score the 1-pager and attach scores to the current OPIK span.
+    # update_current_span() reaches into the thread-local context — no
+    # handle passing required.
+    scores = score_1pager(reply)
+    opik_context.update_current_span(
+        feedback_scores=[
+            {"name": name, "value": value}
+            for name, value in scores.items()
+        ]
+    )
+
+    return reply
+
+
+@opik.track(name="generate_1pager_pipeline")
+def generate_1pager_pipeline(session_id: str) -> str:
+    """
+    TOP-LEVEL TRACE: the full research → generation pipeline.
+
+    This is the function the OPIK dashboard shows as the root trace entry.
+    It calls the two child spans in sequence:
+      1. track_web_research  — 3 Tavily searches
+      2. track_1pager_generation — Claude generates 1-pager + eval scores logged
+
+    Called by the /research endpoint. All side effects (updating sessions,
+    session_research, session_documents) remain in the endpoint; this function
+    is pure pipeline logic.
+    """
+    history = sessions[session_id]
+
+    # Child span 1 — web research (graceful degradation if Tavily fails)
+    try:
+        research_summary = track_web_research(session_id)
+    except Exception:
+        research_summary = (
+            "(Web research unavailable — generating from conversation context only.)"
+        )
+
+    # Store research summary so the session retains it
+    session_research[session_id] = research_summary
+
+    # Child span 2 — 1-pager generation + eval scoring
+    reply = track_1pager_generation(session_id, history, research_summary)
+
+    return reply, research_summary
+
+
+# ---------------------------------------------------------------------------
 # Request / Response models
 # ---------------------------------------------------------------------------
 class ChatRequest(BaseModel):
@@ -440,11 +635,11 @@ def chat(request: ChatRequest):
     # 2. Append user message
     history.append({"role": "user", "content": request.message})
 
-    # 3. Build LangChain message list and call Claude
-    lc_messages = [SystemMessage(content=SYSTEM_PROMPT)] + build_lc_messages(history)
-
+    # 3. Call Claude via the OPIK-tracked wrapper.
+    #    track_clarification() creates a "clarification_questions" trace in
+    #    OPIK and records the input message + output reply automatically.
     try:
-        reply = invoke_with_backoff(lc_messages)
+        reply = track_clarification(request.session_id, request.message, history)
     except Exception as e:
         err = str(e).lower()
         if "api key" in err or "credential" in err or "401" in err or "authentication" in err:
@@ -504,30 +699,13 @@ def research(request: ResearchRequest):
 
     history = sessions[request.session_id]
 
-    # 1. Run Tavily market research (gracefully degrade if unavailable)
+    # Run the full OPIK-traced pipeline:
+    #   generate_1pager_pipeline() is the top-level trace in OPIK.
+    #   Inside it, track_web_research() and track_1pager_generation() are
+    #   child spans. Eval scores (completeness, research_usage, clarity) are
+    #   logged automatically onto the 1pager_generation span.
     try:
-        research_summary = research_initiative(request.session_id)
-    except Exception as e:
-        research_summary = (
-            "(Web research unavailable — generating from conversation context only.)"
-        )
-
-    # 2. Store research summary on the session for reference
-    session_research[request.session_id] = research_summary
-
-    # 3. Build message list: system prompt + conversation history + research injection
-    lc_messages = [SystemMessage(content=SYSTEM_PROMPT)]
-    lc_messages.extend(build_lc_messages(history))
-    lc_messages.append(HumanMessage(content=(
-        f"Research complete. Here is the market context to use when writing "
-        f"the Market Context section of the 1-pager:\n\n"
-        f"{research_summary}\n\n"
-        f"Now generate the PM 1-pager."
-    )))
-
-    # 4. Ask Claude to generate the 1-pager
-    try:
-        reply = invoke_with_backoff(lc_messages)
+        reply, research_summary = generate_1pager_pipeline(request.session_id)
     except Exception as e:
         err = str(e).lower()
         if "api key" in err or "credential" in err or "authentication" in err:
@@ -536,7 +714,7 @@ def research(request: ResearchRequest):
             raise HTTPException(status_code=429, detail="Anthropic rate limit hit.")
         raise HTTPException(status_code=503, detail=f"Could not reach Anthropic API: {e}")
 
-    # 5. Append the final 1-pager to history and cache it for downloads
+    # Append the final 1-pager to history and cache it for downloads
     history.append({"role": "assistant", "content": reply})
     session_documents[request.session_id] = reply
 

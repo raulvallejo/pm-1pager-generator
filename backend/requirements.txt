@@ -7,3 +7,4 @@ langchain-core
 tavily-python
 python-docx
 reportlab
+opik
