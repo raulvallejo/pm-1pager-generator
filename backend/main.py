@@ -627,3 +627,8 @@ def generate(request: GenerateRequest):
 @app.get("/")
 def health_check():
     return {"status": "ok"}
+
+
+@app.get("/api/test")
+def test():
+    return {"message": "api prefix working", "version": "sprint5"}
