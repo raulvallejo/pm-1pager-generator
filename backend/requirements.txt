@@ -4,3 +4,4 @@ pydantic
 python-dotenv
 langchain-anthropic
 langchain-core
+tavily-python

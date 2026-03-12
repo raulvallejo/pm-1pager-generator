@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import ChatWindow from "./components/ChatWindow";
 import InputForm from "./components/InputForm";
-import { chatWithAgent } from "./api/client";
+import { chatWithAgent, triggerResearch } from "./api/client";
 
 // ---------------------------------------------------------------------------
 // Session ID
@@ -37,18 +37,33 @@ export default function App() {
     setIsLoading(true);
 
     try {
-      // 2. Call the backend /chat endpoint with the current sessionId.
-      //    The backend looks up (or creates) the conversation history for
-      //    this sessionId, appends the message, calls Claude, and returns
-      //    the reply plus an isComplete flag.
-      const { reply, isComplete } = await chatWithAgent(sessionId, userText);
+      // 2. Call the backend /chat endpoint.
+      //    Returns either a clarifying question (normal turn) or
+      //    isResearching=true when Claude has enough info to proceed.
+      const { reply, isComplete, isResearching } = await chatWithAgent(sessionId, userText);
 
-      // 3. Append Claude's reply.
-      //    isDocument=true tells ChatWindow to apply document-specific styling.
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", text: reply, isDocument: isComplete },
-      ]);
+      if (isResearching) {
+        // 3a. Show the "Researching..." message in the chat immediately so
+        //     the user knows something is happening during the Tavily calls.
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", text: reply },
+        ]);
+
+        // 3b. Auto-fire the /research call — no user action needed.
+        //     isLoading stays true the whole time, keeping the input disabled.
+        const { reply: docReply, isComplete: docComplete } = await triggerResearch(sessionId);
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", text: docReply, isDocument: docComplete },
+        ]);
+      } else {
+        // 3c. Normal clarifying question or direct 1-pager.
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", text: reply, isDocument: isComplete },
+        ]);
+      }
     } catch (err) {
       setMessages((prev) => [
         ...prev,

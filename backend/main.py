@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import uuid
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,11 +8,11 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from tavily import TavilyClient
 
 # ---------------------------------------------------------------------------
 # Load environment variables from backend/.env
-# This makes ANTHROPIC_API_KEY available via os.environ.
-# langchain-anthropic reads ANTHROPIC_API_KEY automatically.
+# Makes ANTHROPIC_API_KEY and TAVILY_API_KEY available via os.environ.
 # ---------------------------------------------------------------------------
 load_dotenv()
 
@@ -27,17 +28,25 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # Claude client via LangChain
 #
-# ChatAnthropic reads ANTHROPIC_API_KEY from the environment.
-# We create ONE shared instance at startup — it's thread-safe.
+# ChatAnthropic reads ANTHROPIC_API_KEY from the environment automatically.
+# One shared instance at startup — thread-safe.
 # ---------------------------------------------------------------------------
 llm = ChatAnthropic(model="claude-haiku-4-5")
 
 # ---------------------------------------------------------------------------
+# Tavily client
+#
+# TavilyClient wraps the Tavily Search REST API.
+# .search(query, max_results) returns a dict with a "results" list, where
+# each result has "title", "url", and "content" fields.
+# ---------------------------------------------------------------------------
+tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+
+# ---------------------------------------------------------------------------
 # Exponential backoff helper
 #
-# Retries the Claude call up to MAX_RETRIES times when a rate limit error
-# is detected. Waits 2^attempt seconds between tries (2s, 4s, 8s).
-# All other errors are re-raised immediately without retrying.
+# Retries the Claude call up to MAX_RETRIES times on rate limit errors.
+# Waits 2^attempt seconds between tries: 2s, 4s, 8s.
 # ---------------------------------------------------------------------------
 MAX_RETRIES = 3
 
@@ -52,34 +61,30 @@ def invoke_with_backoff(messages: list) -> str:
                 wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
                 time.sleep(wait)
                 continue
-            raise  # not a rate limit, or all retries exhausted — bubble up
+            raise
 
 # ---------------------------------------------------------------------------
-# In-memory session store
+# Session stores
 #
-# sessions is a plain Python dict:
-#   key   → session_id  (a UUID string the frontend generates and sends)
-#   value → list of message dicts, e.g. [{"role": "user", "content": "..."}]
+# sessions       — conversation history per session_id (list of role/content dicts)
+# session_research — research summary per session_id (populated by /research)
 #
-# The Anthropic API is *stateless* — every call must include the full
-# conversation history. We store that history here, keyed by session_id.
-#
-# Limitation: sessions disappear when the server restarts. Sprint 3 can
-# add a real database (Redis, Postgres) if persistence is needed.
+# Both are plain dicts keyed by the UUID the frontend generates.
+# They disappear on server restart (Sprint 4 can add a real DB).
 # ---------------------------------------------------------------------------
 sessions: dict[str, list[dict]] = {}
+session_research: dict[str, str] = {}
 
 # ---------------------------------------------------------------------------
 # System prompt
 #
-# This is the "personality and rules" message sent to Claude on every call.
-# It is NOT stored in the session history — Anthropic's API accepts it as a
-# separate `system` parameter alongside the `messages` list.
+# Changed from Sprint 2: step 4 now tells Claude to output [READY_FOR_RESEARCH]
+# instead of generating the 1-pager directly. This lets the backend intercept,
+# run Tavily searches, inject the results, and THEN ask Claude for the 1-pager
+# with real market data baked in.
 #
-# The prompt does three things:
-#   1. Defines the agent's role
-#   2. Prescribes the workflow (ask ≤3 questions, then produce the 1-pager)
-#   3. Specifies the exact output format for the 1-pager so we can detect it
+# The 1-pager format is kept here so Claude knows what it will eventually produce.
+# A new "Market Context" section uses the injected Tavily research.
 # ---------------------------------------------------------------------------
 SYSTEM_PROMPT = """\
 You are a Product Management assistant that helps teams turn rough ideas into
@@ -92,23 +97,23 @@ WORKFLOW
    information.
 3. You ask ONE clarifying question per response — maximum 3 questions total.
 4. After at most 3 questions (or sooner if the description is already
-   detailed), you produce the final PM 1-pager.
+   detailed), respond ONLY with the exact token [READY_FOR_RESEARCH] on its
+   own line — nothing else. The system will automatically research the market
+   and then ask you to generate the 1-pager with that context.
 
 RULES
 -----
 - Ask EXACTLY ONE question per turn. Never bundle multiple questions.
-- After 3 questions you MUST produce the 1-pager even if you wish you had
-  more information — make reasonable assumptions and note them in the
-  Risks & Assumptions section.
+- After 3 questions you MUST output [READY_FOR_RESEARCH], even if you wish
+  you had more information.
 - If the user's initial message is already detailed enough, skip questions
-  and go straight to the 1-pager.
-- NEVER produce both a clarifying question and the 1-pager in the same
-  response. It is always one or the other.
+  and output [READY_FOR_RESEARCH] immediately.
+- NEVER combine a question and [READY_FOR_RESEARCH] in the same response.
 
 1-PAGER FORMAT
 --------------
-When you are ready to produce the document, your ENTIRE response must be this
-markdown (fill in the brackets):
+When you are asked to produce the 1-pager (after research context is injected),
+your ENTIRE response must be the following markdown:
 
 ---
 ## PM 1-Pager: [Initiative Name]
@@ -125,72 +130,140 @@ markdown (fill in the brackets):
 ### Key Metrics
 [2–4 measurable success indicators; include targets where possible]
 
+### Market Context
+[2–3 sentences drawing on the provided research: market size, key trends,
+ and notable competitors]
+
 ### Risks & Assumptions
 [Top 3 risks or assumptions that could invalidate this initiative]
 ---
 
-IMPORTANT: when producing the 1-pager, start your response with the exact
-line "---" (three dashes, nothing else on that line) so the frontend can
-detect it and render it as a document.
+IMPORTANT: start your response with the exact line "---" (three dashes, nothing
+else on that line) so the frontend can detect and render it as a document.
 """
+
+
+# ---------------------------------------------------------------------------
+# Helper: convert stored history dicts → LangChain message objects
+#
+# The Anthropic API is stateless — every call must include the full history.
+# LangChain needs typed objects (HumanMessage / AIMessage), not raw dicts.
+# We factor this out so both /chat and /research can reuse it.
+# ---------------------------------------------------------------------------
+def build_lc_messages(history: list) -> list:
+    result = []
+    for msg in history:
+        if msg["role"] == "user":
+            result.append(HumanMessage(content=msg["content"]))
+        else:
+            result.append(AIMessage(content=msg["content"]))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Helper: run Tavily market research for a session
+#
+# Flow:
+#   1. Ask Claude to name the initiative in 3-5 words (used as query base).
+#   2. Build 3 targeted search queries: market size, trends, competitors.
+#   3. Call Tavily for each query and collect the top 3 snippets per query.
+#   4. Return a formatted research string to inject into the 1-pager prompt.
+#
+# Why ask Claude for the initiative name?
+#   The conversation may span multiple turns. Extracting the name via Claude
+#   is more reliable than using the raw first message.
+#
+# Why 3 queries?
+#   Each covers a different angle (size, trends, competition) that maps
+#   directly to the new "Market Context" section of the 1-pager.
+# ---------------------------------------------------------------------------
+def research_initiative(session_id: str) -> str:
+    history = sessions[session_id]
+
+    # Step 1: ask Claude for a concise initiative name to build queries from
+    name_messages = [
+        SystemMessage(content=(
+            "Read this product conversation and return a concise 3-5 word name "
+            "for the initiative being discussed. Return ONLY the name — no "
+            "punctuation, no explanation, nothing else."
+        )),
+        *build_lc_messages(history),
+    ]
+    initiative_name = invoke_with_backoff(name_messages).strip().strip(".")
+
+    # Step 2: build 3 targeted search queries
+    queries = [
+        f"{initiative_name} market size",
+        f"{initiative_name} industry trends 2025",
+        f"{initiative_name} top competitors",
+    ]
+
+    # Step 3: run Tavily searches and collect snippets
+    lines = [f"MARKET RESEARCH FOR: {initiative_name}\n"]
+    for query in queries:
+        lines.append(f"\n### {query}")
+        try:
+            results = tavily_client.search(query=query, max_results=3)
+            for r in results.get("results", [])[:3]:
+                # Truncate long content to keep the injected context concise
+                snippet = r.get("content", "")[:250].replace("\n", " ")
+                lines.append(f"- {r['title']}: {snippet}")
+        except Exception:
+            lines.append("- (search unavailable for this query)")
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
 # Request / Response models
 # ---------------------------------------------------------------------------
 class ChatRequest(BaseModel):
-    session_id: str   # UUID generated by the frontend; identifies this convo
+    session_id: str   # UUID generated by the frontend
     message: str      # The user's latest message
 
 
 class ChatResponse(BaseModel):
-    reply: str        # Claude's response (question or 1-pager)
-    session_id: str   # Echoed back so the frontend can confirm/store it
-    is_complete: bool # True when Claude returned the final 1-pager
+    reply: str         # Claude's response text
+    session_id: str    # Echoed back
+    is_complete: bool  # True when the 1-pager has been generated
+    is_researching: bool  # True when Claude signalled [READY_FOR_RESEARCH]
+
+
+class ResearchRequest(BaseModel):
+    session_id: str   # Must match an existing session
+
+
+class ResearchResponse(BaseModel):
+    reply: str         # The generated 1-pager
+    session_id: str
+    is_complete: bool  # Always True when research succeeds
 
 
 # ---------------------------------------------------------------------------
-# /chat endpoint
+# /chat endpoint (unchanged clarification flow + [READY_FOR_RESEARCH] detection)
 #
-# Flow on each call:
-#   1. Look up (or create) the session's history list.
-#   2. Append the new user message.
-#   3. Send [system_prompt + full history] to Claude.
-#   4. Append Claude's reply to history.
-#   5. Return the reply to the frontend.
-#
-# Claude sees the entire conversation every time — that's what makes the
-# follow-up questions feel coherent. The `system` parameter tells Claude who
-# it is; `messages` is the actual back-and-forth.
+# New in Sprint 3:
+#   - When Claude replies with [READY_FOR_RESEARCH], we do NOT store that
+#     token in history (it's an internal signal, not a real assistant turn).
+#     Instead we return is_researching=True and a user-friendly message.
+#   - The frontend sees is_researching=True, shows "Researching..." in the
+#     chat, and immediately fires a POST /research call.
 # ---------------------------------------------------------------------------
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
-    # 1. Get or create the session's history
+    # 1. Get or create session history
     if request.session_id not in sessions:
         sessions[request.session_id] = []
 
     history = sessions[request.session_id]
 
-    # 2. Append the user's message to the running history
+    # 2. Append user message
     history.append({"role": "user", "content": request.message})
 
-    # 3. Call Claude via LangChain
-    #    LangChain uses typed message objects instead of raw dicts:
-    #      SystemMessage  → the system prompt (sent once, before history)
-    #      HumanMessage   → user turns
-    #      AIMessage      → assistant turns
-    #    We build the full message list fresh on every call so Claude has
-    #    the complete conversation context.
-    lc_messages = [SystemMessage(content=SYSTEM_PROMPT)]
-    for msg in history:
-        if msg["role"] == "user":
-            lc_messages.append(HumanMessage(content=msg["content"]))
-        else:
-            lc_messages.append(AIMessage(content=msg["content"]))
+    # 3. Build LangChain message list and call Claude
+    lc_messages = [SystemMessage(content=SYSTEM_PROMPT)] + build_lc_messages(history)
 
     try:
-        # invoke_with_backoff retries up to 3 times on rate limit errors
-        # before raising, so transient 429s are handled transparently.
         reply = invoke_with_backoff(lc_messages)
     except Exception as e:
         err = str(e).lower()
@@ -200,17 +273,92 @@ def chat(request: ChatRequest):
             raise HTTPException(status_code=429, detail="Anthropic rate limit hit — all retries exhausted.")
         raise HTTPException(status_code=503, detail=f"Could not reach Anthropic API: {e}")
 
-    # 4. Append the assistant reply so the next call includes it as context
+    # 4. Check if Claude is signalling it's ready for research
+    #    We store a clean placeholder in history instead of the raw token so
+    #    the conversation context stays coherent for the /research call.
+    if "[READY_FOR_RESEARCH]" in reply:
+        history.append({"role": "assistant", "content": "[READY_FOR_RESEARCH]"})
+        return ChatResponse(
+            reply="Researching the market for you...",
+            session_id=request.session_id,
+            is_complete=False,
+            is_researching=True,
+        )
+
+    # 5. Normal question turn — store reply and return
     history.append({"role": "assistant", "content": reply})
-
-    # 5. Detect whether this is the final 1-pager (starts with "---")
-    #    The frontend uses this flag to apply different styling.
-    is_complete = reply.strip().startswith("---")
-
     return ChatResponse(
         reply=reply,
         session_id=request.session_id,
-        is_complete=is_complete,
+        is_complete=reply.strip().startswith("---"),
+        is_researching=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# /research endpoint (Sprint 3 — runs Tavily + generates enriched 1-pager)
+#
+# Called automatically by the frontend immediately after receiving
+# is_researching=True from /chat. Flow:
+#   1. Run research_initiative() — asks Claude for a name, runs 3 Tavily
+#      searches, returns a formatted research summary string.
+#   2. Inject the summary into the LangChain message list as a HumanMessage
+#      so Claude sees it as "provided context" in the conversation.
+#   3. Call Claude to generate the 1-pager using that context.
+#   4. Append the 1-pager to session history and return it.
+#
+# Why inject as HumanMessage and not SystemMessage?
+#   Anthropic's API only allows one SystemMessage. We've already used it for
+#   SYSTEM_PROMPT, so we pass research data as a HumanMessage at the end of
+#   the conversation — Claude treats it as the final piece of input before
+#   generating the document.
+# ---------------------------------------------------------------------------
+@app.post("/research", response_model=ResearchResponse)
+def research(request: ResearchRequest):
+    if request.session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found. Start a conversation first.")
+
+    history = sessions[request.session_id]
+
+    # 1. Run Tavily market research (gracefully degrade if unavailable)
+    try:
+        research_summary = research_initiative(request.session_id)
+    except Exception as e:
+        research_summary = (
+            "(Web research unavailable — generating from conversation context only.)"
+        )
+
+    # 2. Store research summary on the session for reference
+    session_research[request.session_id] = research_summary
+
+    # 3. Build message list: system prompt + conversation history + research injection
+    lc_messages = [SystemMessage(content=SYSTEM_PROMPT)]
+    lc_messages.extend(build_lc_messages(history))
+    lc_messages.append(HumanMessage(content=(
+        f"Research complete. Here is the market context to use when writing "
+        f"the Market Context section of the 1-pager:\n\n"
+        f"{research_summary}\n\n"
+        f"Now generate the PM 1-pager."
+    )))
+
+    # 4. Ask Claude to generate the 1-pager
+    try:
+        reply = invoke_with_backoff(lc_messages)
+    except Exception as e:
+        err = str(e).lower()
+        if "api key" in err or "credential" in err or "authentication" in err:
+            raise HTTPException(status_code=401, detail="Invalid ANTHROPIC_API_KEY.")
+        if "quota" in err or "429" in err or "rate" in err or "overloaded" in err:
+            raise HTTPException(status_code=429, detail="Anthropic rate limit hit.")
+        raise HTTPException(status_code=503, detail=f"Could not reach Anthropic API: {e}")
+
+    # 5. Append the final 1-pager to history
+    history.append({"role": "assistant", "content": reply})
+
+    return ResearchResponse(
+        reply=reply,
+        session_id=request.session_id,
+        is_complete=reply.strip().startswith("---"),
     )
 
 

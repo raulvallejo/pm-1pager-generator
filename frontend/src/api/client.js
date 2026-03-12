@@ -36,6 +36,41 @@ export async function chatWithAgent(sessionId, message) {
     reply: data.reply,
     sessionId: data.session_id,
     isComplete: data.is_complete,
+    isResearching: data.is_researching,
+  };
+}
+
+/**
+ * Sprint 3: trigger Tavily market research + 1-pager generation.
+ *
+ * Called automatically by App.jsx when chatWithAgent returns isResearching=true.
+ * Sends the session_id so the backend knows which conversation to research.
+ * Returns the enriched 1-pager once Tavily searches + Claude generation finish.
+ *
+ * @param {string} sessionId
+ * @returns {Promise<{reply: string, sessionId: string, isComplete: boolean}>}
+ */
+export async function triggerResearch(sessionId) {
+  const response = await fetch(`${BASE_URL}/api/research`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+
+  if (!response.ok) {
+    let detail = `Server responded with ${response.status}`;
+    try {
+      const err = await response.json();
+      if (err.detail) detail = err.detail;
+    } catch (_) {}
+    throw new Error(detail);
+  }
+
+  const data = await response.json();
+  return {
+    reply: data.reply,
+    sessionId: data.session_id,
+    isComplete: data.is_complete,
   };
 }
 
