@@ -21,8 +21,6 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-import opik
-from opik import opik_context
 
 # ---------------------------------------------------------------------------
 # Load environment variables from backend/.env
@@ -30,24 +28,7 @@ from opik import opik_context
 # ---------------------------------------------------------------------------
 load_dotenv()
 
-# ---------------------------------------------------------------------------
-# OPIK observability (Sprint 6)
-#
-# opik.configure() sets the API key and project name globally for the process.
-# After this call, every @opik.track decorator in this file will send traces
-# to the OPIK Cloud project named by OPIK_PROJECT_NAME.
-#
-# If OPIK_API_KEY is missing the configure() call raises — we catch it so
-# the app still starts and all existing functionality keeps working; tracing
-# just becomes a no-op.
-# ---------------------------------------------------------------------------
-try:
-    opik.configure(
-        api_key=os.getenv("OPIK_API_KEY", ""),
-        project_name=os.getenv("OPIK_PROJECT_NAME", "pm-1pager-generator"),
-    )
-except Exception:
-    pass  # OPIK is optional — missing key degrades gracefully
+print("Backend started successfully")
 
 app = FastAPI(title="PM 1-Pager Generator API")
 
@@ -126,10 +107,8 @@ session_documents: dict[str, str] = {}
 # ---------------------------------------------------------------------------
 # PII Anonymizer
 #
-# Strips personally identifiable information from text before it is logged
-# to OPIK traces. Applied inside every @opik.track function by calling
-# opik_context.update_current_span() with sanitized inputs/outputs — the
-# LLM still receives the original unsanitized text so response quality is
+# Strips personally identifiable information from user text.
+# The LLM still receives the original unsanitized text so response quality is
 # completely unaffected.
 #
 # Patterns detected:
@@ -527,94 +506,16 @@ def research_initiative(session_id: str) -> str:
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# OPIK-tracked functions (Sprint 6)
-#
-# Each function below is a thin wrapper around existing logic. Decorating
-# them with @opik.track is the ONLY change — the business logic inside is
-# identical to what was inline in the endpoints before.
-#
-# HOW NESTING WORKS:
-#   @opik.track uses Python's threading.local() to track the "current trace".
-#   When generate_1pager_pipeline() calls track_web_research(), OPIK sees
-#   an active parent trace and automatically makes the inner call a child span.
-#   You get a single trace in the dashboard with a timeline like:
-#
-#     generate_1pager_pipeline  ──────────────────────────────────
-#       track_web_research        ───────────
-#       track_1pager_generation             ──────────────────────
-#
-# HOW TIMING WORKS:
-#   @opik.track records wall-clock start and end times for each decorated
-#   function automatically. No manual timing code is needed.
-#
-# HOW INPUTS/OUTPUTS ARE RECORDED:
-#   OPIK captures the function's arguments as "input" and the return value
-#   as "output" for each span. This is automatic — no extra code needed.
-# ---------------------------------------------------------------------------
-
-@opik.track(name="clarification_questions")
 def track_clarification(session_id: str, message: str, history: list) -> str:
-    """
-    Span: one clarification question turn.
-
-    Called once per /chat request during the Q&A phase. Creates its own
-    trace in OPIK (not a child of generate_1pager_pipeline) because each
-    clarification is a separate HTTP request with no shared parent context.
-
-    The LLM receives the original message and history.
-    OPIK receives PII-sanitized versions via update_current_span().
-    """
     lc_messages = [SystemMessage(content=SYSTEM_PROMPT)] + build_lc_messages(history)
-    result = invoke_with_backoff(lc_messages)
-
-    # Override OPIK's auto-captured span data with sanitized versions.
-    # The LLM call above already used the original text — this only affects
-    # what appears in the OPIK dashboard.
-    opik_context.update_current_span(
-        input={
-            "session_id": session_id,
-            "message": anonymize_pii(message),
-            "history": anonymize_history(history),
-        },
-        output=anonymize_pii(result),
-    )
-
-    return result
+    return invoke_with_backoff(lc_messages)
 
 
-@opik.track(name="web_research")
 def track_web_research(session_id: str) -> str:
-    """
-    Span: Tavily market research.
-
-    Child span of generate_1pager_pipeline. Wraps research_initiative()
-    so OPIK records how long the 3 Tavily searches took and what they returned.
-
-    The raw research summary (with any PII from web content) goes to the LLM.
-    OPIK receives a sanitized copy.
-    """
-    result = research_initiative(session_id)
-
-    opik_context.update_current_span(
-        input={"session_id": session_id},
-        output=anonymize_pii(result),
-    )
-
-    return result
+    return research_initiative(session_id)
 
 
-@opik.track(name="1pager_generation")
 def track_1pager_generation(session_id: str, history: list, research_summary: str) -> str:
-    """
-    Span: Claude generates the final 1-pager, then we score it.
-
-    Child span of generate_1pager_pipeline. After Claude responds, we run
-    score_1pager() and log the three eval scores as feedback.
-
-    A single update_current_span() call handles both PII sanitization of
-    inputs/output AND the feedback scores — they go to OPIK together.
-    """
     lc_messages = [SystemMessage(content=SYSTEM_PROMPT)]
     lc_messages.extend(build_lc_messages(history))
     lc_messages.append(HumanMessage(content=(
@@ -623,29 +524,9 @@ def track_1pager_generation(session_id: str, history: list, research_summary: st
         f"{research_summary}\n\n"
         f"Now generate the PM 1-pager."
     )))
-    reply = invoke_with_backoff(lc_messages)
-
-    # Single update_current_span() call:
-    #   - input/output: PII-sanitized so traces don't expose user data
-    #   - feedback_scores: completeness, research_usage, clarity evals
-    scores = score_1pager(reply)
-    opik_context.update_current_span(
-        input={
-            "session_id": session_id,
-            "history": anonymize_history(history),
-            "research_summary": anonymize_pii(research_summary),
-        },
-        output=anonymize_pii(reply),
-        feedback_scores=[
-            {"name": name, "value": value}
-            for name, value in scores.items()
-        ],
-    )
-
-    return reply
+    return invoke_with_backoff(lc_messages)
 
 
-@opik.track(name="generate_1pager_pipeline")
 def generate_1pager_pipeline(session_id: str) -> str:
     """
     TOP-LEVEL TRACE: the full research → generation pipeline.
