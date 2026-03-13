@@ -53,7 +53,7 @@ export default function Message({ role, text, isDocument, sessionId }) {
             Pure CSS, no image file needed. The gradient matches the header
             (blue for assistant, green for completed 1-pager documents).
           */}
-          <div className="message__avatar">AI</div>
+          <div className="message__avatar">🤖</div>
           <span className="message__label">{label}</span>
         </div>
       )}

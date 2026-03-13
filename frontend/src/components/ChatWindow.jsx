@@ -38,7 +38,7 @@ export default function ChatWindow({ messages, isLoading, isResearchingPhase }) 
       {isResearchingPhase && (
         <div className="message message--assistant">
           <div className="message__header">
-            <div className="message__avatar">AI</div>
+            <div className="message__avatar">🤖</div>
             <span className="message__label">AI</span>
           </div>
           <div className="researching-bubble">
@@ -58,7 +58,7 @@ export default function ChatWindow({ messages, isLoading, isResearchingPhase }) 
       {isLoading && !isResearchingPhase && (
         <div className="message message--assistant">
           <div className="message__header">
-            <div className="message__avatar">AI</div>
+            <div className="message__avatar">🤖</div>
             <span className="message__label">AI</span>
           </div>
           <div className="typing-bubble">
