@@ -3,17 +3,6 @@ import ChatWindow from "./components/ChatWindow";
 import InputForm from "./components/InputForm";
 import { chatWithAgent, triggerResearch } from "./api/client";
 
-// ---------------------------------------------------------------------------
-// Session ID
-//
-// crypto.randomUUID() is built into all modern browsers (no library needed).
-// We generate a fresh UUID as the lazy initialiser for useState — this runs
-// once when the component first mounts, not on every render.
-//
-// The session ID is sent to the backend with every message so the backend
-// knows which conversation history to look up and append to.
-// ---------------------------------------------------------------------------
-
 // A "message" object shape:
 // { role: "user"|"assistant", text: string, isDocument?: boolean, sessionId?: string }
 // sessionId is set on document messages so Message.jsx can call /download/* endpoints.
@@ -25,10 +14,15 @@ export default function App() {
   const [messages, setMessages] = useState([
     {
       role: "assistant",
-      text: "Hi! Describe your product initiative and I'll ask you a few questions, then generate a PM 1-pager for you.",
+      text: "Hi! Describe your product initiative and I'll ask you a few clarifying questions, then generate a professional PM 1-pager for you.",
     },
   ]);
   const [isLoading, setIsLoading] = useState(false);
+
+  // isResearchingPhase is true while Tavily web research is running.
+  // ChatWindow uses this to show a "Researching the web..." indicator
+  // separately from the generic typing dots (which show during LLM calls).
+  const [isResearchingPhase, setIsResearchingPhase] = useState(false);
 
   // -------------------------------------------------------------------------
   // handleSubmit — called when the user hits Send
@@ -45,16 +39,21 @@ export default function App() {
       const { reply, isComplete, isResearching } = await chatWithAgent(sessionId, userText);
 
       if (isResearching) {
-        // 3a. Show the "Researching..." message in the chat immediately so
-        //     the user knows something is happening during the Tavily calls.
+        // 3a. Show the agent's transition message (e.g. "Great, I have what I need…")
         setMessages((prev) => [
           ...prev,
           { role: "assistant", text: reply },
         ]);
 
-        // 3b. Auto-fire the /research call — no user action needed.
+        // 3b. Switch to researching phase — ChatWindow shows the amber indicator.
+        setIsResearchingPhase(true);
+
+        // 3c. Auto-fire the /research call — no user action needed.
         //     isLoading stays true the whole time, keeping the input disabled.
         const { reply: docReply, isComplete: docComplete } = await triggerResearch(sessionId);
+
+        // 3d. Research done — hide the indicator and show the final document.
+        setIsResearchingPhase(false);
         setMessages((prev) => [
           ...prev,
           // Include sessionId so the download buttons in Message.jsx know
@@ -62,13 +61,14 @@ export default function App() {
           { role: "assistant", text: docReply, isDocument: docComplete, sessionId },
         ]);
       } else {
-        // 3c. Normal clarifying question or direct 1-pager.
+        // 3e. Normal clarifying question or direct 1-pager.
         setMessages((prev) => [
           ...prev,
           { role: "assistant", text: reply, isDocument: isComplete, sessionId: isComplete ? sessionId : undefined },
         ]);
       }
     } catch (err) {
+      setIsResearchingPhase(false);
       setMessages((prev) => [
         ...prev,
         {
@@ -90,18 +90,35 @@ export default function App() {
   // -------------------------------------------------------------------------
   function handleNewInitiative() {
     setSessionId(crypto.randomUUID());
+    setIsResearchingPhase(false);
     setMessages([
       {
         role: "assistant",
-        text: "Hi! Describe your product initiative and I'll ask you a few questions, then generate a PM 1-pager for you.",
+        text: "Hi! Describe your product initiative and I'll ask you a few clarifying questions, then generate a professional PM 1-pager for you.",
       },
     ]);
   }
 
   return (
     <div className="app-container">
+      {/*
+        Header — gradient background (styled in index.css).
+        Left side: logo emoji + "1Pager" title + tagline subtitle.
+        Right side: "New Initiative" ghost button.
+      */}
       <header className="app-header">
-        <h1>PM 1-Pager Generator</h1>
+        <div className="app-header__brand">
+          <div className="app-header__title-row">
+            {/* Logo emoji — gives the header a visual anchor without needing an image file */}
+            <span className="app-header__logo">📄</span>
+            <h1>1Pager</h1>
+          </div>
+          {/* Tagline — small muted text below the app name */}
+          <span className="app-header__tagline">
+            Turn your product ideas into professional 1-pagers in minutes
+          </span>
+        </div>
+
         <button
           className="new-initiative-btn"
           onClick={handleNewInitiative}
@@ -113,7 +130,16 @@ export default function App() {
       </header>
 
       <main className="app-main">
-        <ChatWindow messages={messages} isLoading={isLoading} />
+        {/*
+          Pass isResearchingPhase so ChatWindow can show the amber
+          "Researching the web..." bubble during the Tavily phase,
+          distinct from the blue typing dots during regular LLM calls.
+        */}
+        <ChatWindow
+          messages={messages}
+          isLoading={isLoading}
+          isResearchingPhase={isResearchingPhase}
+        />
         <InputForm onSubmit={handleSubmit} isLoading={isLoading} />
       </main>
     </div>

@@ -26,22 +26,38 @@ export default function InputForm({ onSubmit, isLoading }) {
 
   return (
     <form className="input-form" onSubmit={handleSubmit}>
-      <textarea
-        className="input-form__textarea"
-        rows={3}
-        placeholder="Describe your product initiative..."
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onKeyDown={handleKeyDown}
-        disabled={isLoading}
-      />
-      <button
-        type="submit"
-        className="input-form__button"
-        disabled={isLoading || !value.trim()}
-      >
-        {isLoading ? "Sending..." : "Send"}
-      </button>
+      {/*
+        input-form__row puts the textarea and Send button side by side.
+        align-items: flex-end means the button always sits at the bottom
+        of the textarea, even when the textarea grows taller.
+      */}
+      <div className="input-form__row">
+        <textarea
+          className="input-form__textarea"
+          rows={3}
+          placeholder="Describe your product initiative..."
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={handleKeyDown}
+          disabled={isLoading}
+        />
+        <button
+          type="submit"
+          className="input-form__button"
+          disabled={isLoading || !value.trim()}
+        >
+          {isLoading ? "Sending..." : "Send"}
+        </button>
+      </div>
+
+      {/*
+        Keyboard shortcut hint — small muted text below the input row.
+        Helps new users discover the Enter-to-send shortcut without cluttering
+        the UI with instructions.
+      */}
+      <p className="input-form__hint">
+        Press Enter to send · Shift+Enter for new line
+      </p>
     </form>
   );
 }
