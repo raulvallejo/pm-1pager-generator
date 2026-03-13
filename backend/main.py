@@ -1,5 +1,6 @@
 import os
 import io
+import re
 import html
 import time
 import json
@@ -121,6 +122,69 @@ session_research: dict[str, str] = {}
 # Populated whenever a completed 1-pager is returned (from /chat or /research).
 # The /download/* endpoints read from here to generate files.
 session_documents: dict[str, str] = {}
+
+# ---------------------------------------------------------------------------
+# PII Anonymizer
+#
+# Strips personally identifiable information from text before it is logged
+# to OPIK traces. Applied inside every @opik.track function by calling
+# opik_context.update_current_span() with sanitized inputs/outputs — the
+# LLM still receives the original unsanitized text so response quality is
+# completely unaffected.
+#
+# Patterns detected:
+#   Email addresses — john@example.com          → [EMAIL]
+#   Phone numbers   — +1 (555) 123-4567         → [PHONE]
+#   Names           — context-triggered only    → [NAME]
+#                     (e.g. "My name is John Smith", "I'm Sarah")
+#
+# WHY context-triggered for names?
+#   A naive "two consecutive Title-Case words" regex would fire on product
+#   content like "Problem Statement", "Market Context", "Key Metrics" —
+#   every section header in a 1-pager. By requiring a lead phrase like
+#   "my name is" or "I'm", we keep precision high and false positives low.
+# ---------------------------------------------------------------------------
+
+# Matches standard email addresses
+_EMAIL_RE = re.compile(
+    r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b'
+)
+
+# Matches US/international phone numbers in common formats:
+#   +1 (555) 123-4567 | 555-123-4567 | 555.123.4567 | 5551234567
+_PHONE_RE = re.compile(
+    r'\b(?:\+?1[\s.\-]?)?'        # optional +1 country code
+    r'(?:\(?\d{3}\)?[\s.\-]?)'    # area code, optional parens
+    r'\d{3}[\s.\-]?\d{4}\b'       # 7-digit subscriber number
+)
+
+# Only fires when a name is introduced with a known trigger phrase.
+# Captures 1–3 Title-Case word sequences following the phrase.
+_NAME_RE = re.compile(
+    r"(?i)"                                                       # case-insensitive
+    r"(?:my name is|i'?m|i am|call me|this is|contact|by)\s+"   # trigger phrases
+    r"([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){0,2})"          # 1–3 name parts
+)
+
+
+def anonymize_pii(text: str) -> str:
+    """Replace PII patterns in text with safe placeholders."""
+    if not isinstance(text, str) or not text:
+        return text
+    text = _EMAIL_RE.sub("[EMAIL]", text)
+    text = _PHONE_RE.sub("[PHONE]", text)
+    # Substitute only the captured name group, preserving the trigger phrase
+    text = _NAME_RE.sub(lambda m: m.group(0).replace(m.group(1), "[NAME]"), text)
+    return text
+
+
+def anonymize_history(history: list) -> list:
+    """Return a sanitized copy of a conversation history list."""
+    return [
+        {"role": msg["role"], "content": anonymize_pii(msg["content"])}
+        for msg in history
+    ]
+
 
 # ---------------------------------------------------------------------------
 # System prompt
@@ -498,11 +562,25 @@ def track_clarification(session_id: str, message: str, history: list) -> str:
     trace in OPIK (not a child of generate_1pager_pipeline) because each
     clarification is a separate HTTP request with no shared parent context.
 
-    Input recorded by OPIK: session_id, message, history length.
-    Output recorded: Claude's clarifying question text.
+    The LLM receives the original message and history.
+    OPIK receives PII-sanitized versions via update_current_span().
     """
     lc_messages = [SystemMessage(content=SYSTEM_PROMPT)] + build_lc_messages(history)
-    return invoke_with_backoff(lc_messages)
+    result = invoke_with_backoff(lc_messages)
+
+    # Override OPIK's auto-captured span data with sanitized versions.
+    # The LLM call above already used the original text — this only affects
+    # what appears in the OPIK dashboard.
+    opik_context.update_current_span(
+        input={
+            "session_id": session_id,
+            "message": anonymize_pii(message),
+            "history": anonymize_history(history),
+        },
+        output=anonymize_pii(result),
+    )
+
+    return result
 
 
 @opik.track(name="web_research")
@@ -513,10 +591,17 @@ def track_web_research(session_id: str) -> str:
     Child span of generate_1pager_pipeline. Wraps research_initiative()
     so OPIK records how long the 3 Tavily searches took and what they returned.
 
-    Input recorded: session_id.
-    Output recorded: full formatted research summary string.
+    The raw research summary (with any PII from web content) goes to the LLM.
+    OPIK receives a sanitized copy.
     """
-    return research_initiative(session_id)
+    result = research_initiative(session_id)
+
+    opik_context.update_current_span(
+        input={"session_id": session_id},
+        output=anonymize_pii(result),
+    )
+
+    return result
 
 
 @opik.track(name="1pager_generation")
@@ -525,12 +610,10 @@ def track_1pager_generation(session_id: str, history: list, research_summary: st
     Span: Claude generates the final 1-pager, then we score it.
 
     Child span of generate_1pager_pipeline. After Claude responds, we run
-    score_1pager() and log the three scores as feedback on THIS span using
-    opik_context.update_current_span(). The scores appear in OPIK's UI
-    alongside the span's input/output and timing.
+    score_1pager() and log the three eval scores as feedback.
 
-    Input recorded: session_id, history length, research_summary.
-    Output recorded: the full 1-pager markdown text.
+    A single update_current_span() call handles both PII sanitization of
+    inputs/output AND the feedback scores — they go to OPIK together.
     """
     lc_messages = [SystemMessage(content=SYSTEM_PROMPT)]
     lc_messages.extend(build_lc_messages(history))
@@ -542,15 +625,21 @@ def track_1pager_generation(session_id: str, history: list, research_summary: st
     )))
     reply = invoke_with_backoff(lc_messages)
 
-    # Score the 1-pager and attach scores to the current OPIK span.
-    # update_current_span() reaches into the thread-local context — no
-    # handle passing required.
+    # Single update_current_span() call:
+    #   - input/output: PII-sanitized so traces don't expose user data
+    #   - feedback_scores: completeness, research_usage, clarity evals
     scores = score_1pager(reply)
     opik_context.update_current_span(
+        input={
+            "session_id": session_id,
+            "history": anonymize_history(history),
+            "research_summary": anonymize_pii(research_summary),
+        },
+        output=anonymize_pii(reply),
         feedback_scores=[
             {"name": name, "value": value}
             for name, value in scores.items()
-        ]
+        ],
     )
 
     return reply
