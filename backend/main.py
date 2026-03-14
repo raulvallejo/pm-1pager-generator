@@ -21,14 +21,38 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+import opik
 
 # ---------------------------------------------------------------------------
 # Load environment variables from backend/.env
-# Makes ANTHROPIC_API_KEY, TAVILY_API_KEY, and OPIK_API_KEY available.
+# ANTHROPIC_API_KEY, TAVILY_API_KEY, OPIK_API_KEY etc. are read from here
+# in local dev. On Render they are set directly in the dashboard.
+# NOTE: opik.configure() is never called — OPIK reads its config from env
+# vars (OPIK_API_KEY, OPIK_PROJECT_NAME, OPIK_WORKSPACE, OPIK_URL_OVERRIDE)
+# automatically at import time, which avoids the interactive TTY prompt.
 # ---------------------------------------------------------------------------
 load_dotenv()
 
-print("Backend started successfully")
+print("OPIK initialized via env vars")
+
+
+# ---------------------------------------------------------------------------
+# Safe OPIK tracking decorator
+#
+# Wraps opik.track() so that any failure at decoration time (bad API key,
+# network issue, version incompatibility) logs a warning and falls back to
+# the plain function rather than crashing the server.
+#
+# Usage:  @_safe_track(name="my_span")
+# ---------------------------------------------------------------------------
+def _safe_track(name: str):
+    def decorator(func):
+        try:
+            return opik.track(name=name)(func)
+        except Exception as e:
+            print(f"WARNING: OPIK @track setup failed for '{name}': {e} — running untracked")
+            return func
+    return decorator
 
 app = FastAPI(title="PM 1-Pager Generator API")
 
@@ -506,6 +530,7 @@ def research_initiative(session_id: str) -> str:
     return "\n".join(lines)
 
 
+@_safe_track(name="clarification_questions")
 def track_clarification(session_id: str, message: str, history: list) -> str:
     lc_messages = [SystemMessage(content=SYSTEM_PROMPT)] + build_lc_messages(history)
     return invoke_with_backoff(lc_messages)
