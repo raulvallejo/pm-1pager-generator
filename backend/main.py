@@ -111,6 +111,37 @@ def invoke_with_backoff(messages: list) -> str:
                 continue
             raise
 
+
+def _invoke_with_usage(messages: list) -> tuple[str, dict]:
+    """invoke_with_backoff + token usage and latency capture."""
+    for attempt in range(MAX_RETRIES):
+        try:
+            t0 = time.time()
+            result = llm.invoke(messages)
+            latency_ms = round((time.time() - t0) * 1000)
+
+            usage = getattr(result, "usage_metadata", {}) or {}
+            input_tokens  = usage.get("input_tokens", 0)
+            output_tokens = usage.get("output_tokens", 0)
+            total_tokens  = usage.get("total_tokens", input_tokens + output_tokens)
+            estimated_cost = (input_tokens / 1_000_000 * 1.00) + (output_tokens / 1_000_000 * 5.00)
+
+            return result.content, {
+                "prompt_tokens":      input_tokens,    # OpenAI key names required by OPIK UI
+                "completion_tokens":  output_tokens,
+                "total_tokens":       total_tokens,
+                "latency_ms":         latency_ms,
+                "estimated_cost_usd": round(estimated_cost, 8),
+            }
+        except Exception as e:
+            err = str(e).lower()
+            is_rate_limit = "quota" in err or "429" in err or "rate" in err
+            if is_rate_limit and attempt < MAX_RETRIES - 1:
+                wait = 2 ** (attempt + 1)
+                time.sleep(wait)
+                continue
+            raise
+
 # ---------------------------------------------------------------------------
 # Session stores
 #
@@ -540,6 +571,7 @@ def track_web_research(session_id: str) -> str:
     return research_initiative(session_id)
 
 
+@_safe_track(name="1pager_generation")
 def track_1pager_generation(session_id: str, history: list, research_summary: str) -> str:
     lc_messages = [SystemMessage(content=SYSTEM_PROMPT)]
     lc_messages.extend(build_lc_messages(history))
@@ -549,9 +581,23 @@ def track_1pager_generation(session_id: str, history: list, research_summary: st
         f"{research_summary}\n\n"
         f"Now generate the PM 1-pager."
     )))
-    return invoke_with_backoff(lc_messages)
+    content, usage = _invoke_with_usage(lc_messages)
+    try:
+        opik.opik_context.update_current_span(
+            usage={
+                "prompt_tokens":     usage["prompt_tokens"],
+                "completion_tokens": usage["completion_tokens"],
+                "total_tokens":      usage["total_tokens"],
+            },
+            total_cost=usage["estimated_cost_usd"],
+            metadata={"latency_ms": usage["latency_ms"]},
+        )
+    except Exception as e:
+        print(f"WARNING: OPIK span metadata update failed: {e}")
+    return content
 
 
+@_safe_track(name="1pager_pipeline")
 def generate_1pager_pipeline(session_id: str) -> str:
     """
     TOP-LEVEL TRACE: the full research → generation pipeline.
