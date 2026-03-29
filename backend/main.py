@@ -45,10 +45,10 @@ print("OPIK initialized via env vars")
 #
 # Usage:  @_safe_track(name="my_span")
 # ---------------------------------------------------------------------------
-def _safe_track(name: str):
+def _safe_track(name: str, type: str = "general"):
     def decorator(func):
         try:
-            return opik.track(name=name)(func)
+            return opik.track(name=name, type=type)(func)
         except Exception as e:
             print(f"WARNING: OPIK @track setup failed for '{name}': {e} — running untracked")
             return func
@@ -571,7 +571,7 @@ def track_web_research(session_id: str) -> str:
     return research_initiative(session_id)
 
 
-@_safe_track(name="1pager_generation")
+@_safe_track(name="1pager_generation", type="llm")
 def track_1pager_generation(session_id: str, history: list, research_summary: str) -> str:
     lc_messages = [SystemMessage(content=SYSTEM_PROMPT)]
     lc_messages.extend(build_lc_messages(history))
@@ -588,8 +588,8 @@ def track_1pager_generation(session_id: str, history: list, research_summary: st
                 "prompt_tokens":     usage["prompt_tokens"],
                 "completion_tokens": usage["completion_tokens"],
                 "total_tokens":      usage["total_tokens"],
+                "total_cost":        usage["estimated_cost_usd"],
             },
-            total_cost=usage["estimated_cost_usd"],
             metadata={"latency_ms": usage["latency_ms"]},
         )
     except Exception as e:
