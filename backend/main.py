@@ -92,6 +92,10 @@ llm = ChatAnthropic(model="claude-haiku-4-5")
 # ---------------------------------------------------------------------------
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
+# Shared OPIK client — used for prompt fetching and feedback score logging.
+# One instance at startup so flush() reliably drains the batch queue.
+_opik_client = _opik_client_module.get_client_cached()
+
 # ---------------------------------------------------------------------------
 # Exponential backoff helper
 #
@@ -293,8 +297,7 @@ else on that line) so the frontend can detect and render it as a document.
 def _fetch_opik_prompt(name: str) -> str:
     """Fetch latest prompt template from OPIK Prompt Library. Falls back to SYSTEM_PROMPT on any failure."""
     try:
-        client = _opik_client_module.get_client_cached()
-        prompt_client = _PromptClient(client.rest_client)
+        prompt_client = _PromptClient(_opik_client.rest_client)
         version = prompt_client.get_prompt(name=name)
         if version and version.template:
             print(f"Loaded '{name}' from OPIK Prompt Library (commit: {version.commit})")
@@ -763,7 +766,16 @@ def research(request: ResearchRequest):
     if request.session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found. Start a conversation first.")
 
+    # Trim history to everything up to and including the last [READY_FOR_RESEARCH]
+    # message. This prevents a previous 1-pager from polluting the context on
+    # Regenerate, where the same session_id is reused.
     history = sessions[request.session_id]
+    last_ready_idx = None
+    for i, msg in enumerate(history):
+        if msg.get("content") == "[READY_FOR_RESEARCH]":
+            last_ready_idx = i
+    if last_ready_idx is not None:
+        sessions[request.session_id] = history[:last_ready_idx + 1]
 
     # Run the full OPIK-traced pipeline:
     #   generate_1pager_pipeline() is the top-level trace in OPIK.
@@ -780,9 +792,12 @@ def research(request: ResearchRequest):
             raise HTTPException(status_code=429, detail="Anthropic rate limit hit.")
         raise HTTPException(status_code=503, detail=f"Could not reach Anthropic API: {e}")
 
-    # Append the final 1-pager to history and cache it for downloads
-    history.append({"role": "assistant", "content": reply})
+    # Append the final 1-pager to history and cache it for downloads.
+    # Use sessions[...] directly — history may point to the old list if trimmed above.
+    sessions[request.session_id].append({"role": "assistant", "content": reply})
     session_documents[request.session_id] = reply
+
+    print(f"DEBUG /research trace_id: {trace_id!r}")
 
     return ResearchResponse(
         reply=reply,
@@ -818,12 +833,12 @@ class FeedbackRequest(BaseModel):
 def feedback(request: FeedbackRequest):
     score_value = 1.0 if request.event_type == "download" else 0.0
     try:
-        client = _opik_client_module.get_client_cached()
-        client.log_traces_feedback_scores(scores=[{
+        _opik_client.log_traces_feedback_scores(scores=[{
             "id": request.trace_id,
             "name": "satisfaction",
             "value": score_value,
         }])
+        _opik_client.flush()
     except Exception as e:
         print(f"WARNING: Could not log OPIK feedback for trace {request.trace_id}: {e}")
     return {"ok": True}
