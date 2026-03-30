@@ -22,6 +22,8 @@ from reportlab.lib.units import cm
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 import opik
+from opik.api_objects.prompt.client import PromptClient as _PromptClient
+from opik.api_objects import opik_client as _opik_client_module
 
 # ---------------------------------------------------------------------------
 # Load environment variables from backend/.env
@@ -286,6 +288,24 @@ your ENTIRE response must be the following markdown:
 IMPORTANT: start your response with the exact line "---" (three dashes, nothing
 else on that line) so the frontend can detect and render it as a document.
 """
+
+
+def _fetch_opik_prompt(name: str) -> str:
+    """Fetch latest prompt template from OPIK Prompt Library. Falls back to SYSTEM_PROMPT on any failure."""
+    try:
+        client = _opik_client_module.get_client_cached()
+        prompt_client = _PromptClient(client.rest_client)
+        version = prompt_client.get_prompt(name=name)
+        if version and version.template:
+            print(f"Loaded '{name}' from OPIK Prompt Library (commit: {version.commit})")
+            return version.template
+        print(f"WARNING: OPIK prompt '{name}' not found — using hardcoded fallback")
+    except Exception as e:
+        print(f"WARNING: Could not fetch '{name}' from OPIK Prompt Library: {e} — using hardcoded fallback")
+    return SYSTEM_PROMPT
+
+
+ACTIVE_SYSTEM_PROMPT = _fetch_opik_prompt("1pager-system-prompt")
 
 
 # ---------------------------------------------------------------------------
@@ -563,7 +583,7 @@ def research_initiative(session_id: str) -> str:
 
 @_safe_track(name="clarification_questions")
 def track_clarification(session_id: str, message: str, history: list) -> str:
-    lc_messages = [SystemMessage(content=SYSTEM_PROMPT)] + build_lc_messages(history)
+    lc_messages = [SystemMessage(content=ACTIVE_SYSTEM_PROMPT)] + build_lc_messages(history)
     return invoke_with_backoff(lc_messages)
 
 
@@ -573,7 +593,7 @@ def track_web_research(session_id: str) -> str:
 
 @_safe_track(name="1pager_generation", type="llm")
 def track_1pager_generation(session_id: str, history: list, research_summary: str) -> str:
-    lc_messages = [SystemMessage(content=SYSTEM_PROMPT)]
+    lc_messages = [SystemMessage(content=ACTIVE_SYSTEM_PROMPT)]
     lc_messages.extend(build_lc_messages(history))
     lc_messages.append(HumanMessage(content=(
         f"Research complete. Here is the market context to use when writing "
