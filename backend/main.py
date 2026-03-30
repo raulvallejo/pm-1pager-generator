@@ -647,7 +647,11 @@ def generate_1pager_pipeline(session_id: str) -> str:
     # Child span 2 — 1-pager generation + eval scoring
     reply = track_1pager_generation(session_id, history, research_summary)
 
-    return reply, research_summary
+    # Capture trace_id while the OPIK trace context is still active (before return closes it)
+    trace_data = opik.opik_context.get_current_trace_data()
+    trace_id = trace_data.id if trace_data else None
+
+    return reply, research_summary, trace_id
 
 
 # ---------------------------------------------------------------------------
@@ -673,6 +677,7 @@ class ResearchResponse(BaseModel):
     reply: str         # The generated 1-pager
     session_id: str
     is_complete: bool  # Always True when research succeeds
+    trace_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -766,7 +771,7 @@ def research(request: ResearchRequest):
     #   child spans. Eval scores (completeness, research_usage, clarity) are
     #   logged automatically onto the 1pager_generation span.
     try:
-        reply, research_summary = generate_1pager_pipeline(request.session_id)
+        reply, research_summary, trace_id = generate_1pager_pipeline(request.session_id)
     except Exception as e:
         err = str(e).lower()
         if "api key" in err or "credential" in err or "authentication" in err:
@@ -783,6 +788,7 @@ def research(request: ResearchRequest):
         reply=reply,
         session_id=request.session_id,
         is_complete=reply.strip().startswith("---"),
+        trace_id=trace_id,
     )
 
 
@@ -801,6 +807,26 @@ def research(request: ResearchRequest):
 # ---------------------------------------------------------------------------
 class DownloadRequest(BaseModel):
     session_id: str
+
+
+class FeedbackRequest(BaseModel):
+    trace_id: str
+    event_type: str  # "download" or "regenerate"
+
+
+@router.post("/feedback")
+def feedback(request: FeedbackRequest):
+    score_value = 1.0 if request.event_type == "download" else 0.0
+    try:
+        client = _opik_client_module.get_client_cached()
+        client.log_traces_feedback_scores(scores=[{
+            "id": request.trace_id,
+            "name": "satisfaction",
+            "value": score_value,
+        }])
+    except Exception as e:
+        print(f"WARNING: Could not log OPIK feedback for trace {request.trace_id}: {e}")
+    return {"ok": True}
 
 
 @router.post("/download/docx")

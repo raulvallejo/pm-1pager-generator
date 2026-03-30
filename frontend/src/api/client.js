@@ -71,6 +71,7 @@ export async function triggerResearch(sessionId) {
     reply: data.reply,
     sessionId: data.session_id,
     isComplete: data.is_complete,
+    traceId: data.trace_id ?? null,
   };
 }
 
@@ -112,6 +113,25 @@ export async function downloadDoc(sessionId, format) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url); // free the temporary URL from browser memory
+}
+
+/**
+ * Fire-and-forget feedback signal to log download/regenerate events as OPIK satisfaction scores.
+ * Errors are swallowed — feedback failures must never surface to the user.
+ *
+ * @param {string} traceId   - OPIK trace_id returned by /api/research
+ * @param {"download"|"regenerate"} eventType
+ */
+export async function sendFeedback(traceId, eventType) {
+  try {
+    await fetch(`${BASE_URL}/api/feedback`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ trace_id: traceId, event_type: eventType }),
+    });
+  } catch (_) {
+    // fire-and-forget — don't surface feedback errors to the user
+  }
 }
 
 /**

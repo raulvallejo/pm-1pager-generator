@@ -8,7 +8,7 @@ import Message from "./Message";
  *   isLoading:          boolean — true while any backend call is in flight
  *   isResearchingPhase: boolean — true specifically during Tavily web research
  */
-export default function ChatWindow({ messages, isLoading, isResearchingPhase }) {
+export default function ChatWindow({ messages, isLoading, isResearchingPhase, onRegenerate }) {
   // Auto-scroll to the bottom whenever messages change or loading state changes
   const bottomRef = useRef(null);
 
@@ -25,6 +25,8 @@ export default function ChatWindow({ messages, isLoading, isResearchingPhase }) 
           text={msg.text}
           isDocument={msg.isDocument}
           sessionId={msg.sessionId}
+          traceId={msg.traceId}
+          onRegenerate={onRegenerate}
         />
       ))}
 

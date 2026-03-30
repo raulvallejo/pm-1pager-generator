@@ -50,15 +50,14 @@ export default function App() {
 
         // 3c. Auto-fire the /research call — no user action needed.
         //     isLoading stays true the whole time, keeping the input disabled.
-        const { reply: docReply, isComplete: docComplete } = await triggerResearch(sessionId);
+        const { reply: docReply, isComplete: docComplete, traceId } = await triggerResearch(sessionId);
 
         // 3d. Research done — hide the indicator and show the final document.
         setIsResearchingPhase(false);
         setMessages((prev) => [
           ...prev,
-          // Include sessionId so the download buttons in Message.jsx know
-          // which session to request the file for.
-          { role: "assistant", text: docReply, isDocument: docComplete, sessionId },
+          // Include sessionId + traceId so download buttons and feedback calls work.
+          { role: "assistant", text: docReply, isDocument: docComplete, sessionId, traceId },
         ]);
       } else {
         // 3e. Normal clarifying question or direct 1-pager.
@@ -88,6 +87,27 @@ export default function App() {
   // the next time the user sends a message. The old session stays in memory
   // on the server but is simply no longer referenced.
   // -------------------------------------------------------------------------
+  async function handleRegenerate(regenSessionId) {
+    setIsLoading(true);
+    setIsResearchingPhase(true);
+    try {
+      const { reply: docReply, isComplete: docComplete, traceId } = await triggerResearch(regenSessionId);
+      setIsResearchingPhase(false);
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", text: docReply, isDocument: docComplete, sessionId: regenSessionId, traceId },
+      ]);
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", text: `Error: ${err.message}. Is the backend running?` },
+      ]);
+    } finally {
+      setIsResearchingPhase(false);
+      setIsLoading(false);
+    }
+  }
+
   function handleNewInitiative() {
     setSessionId(crypto.randomUUID());
     setIsResearchingPhase(false);
@@ -139,6 +159,7 @@ export default function App() {
           messages={messages}
           isLoading={isLoading}
           isResearchingPhase={isResearchingPhase}
+          onRegenerate={handleRegenerate}
         />
         <InputForm onSubmit={handleSubmit} isLoading={isLoading} />
       </main>
