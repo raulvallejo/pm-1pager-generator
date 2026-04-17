@@ -74,6 +74,38 @@ backend/
 
 ---
 
+## A2A Client
+
+This agent now acts as an A2A client — it calls Market Scout as an external
+research agent via the A2A protocol instead of running its own Tavily searches.
+
+**Market Scout endpoints:**
+- Agent Card: `https://market-scout-405j.onrender.com/.well-known/agent.json`
+- A2A task endpoint: `https://market-scout-405j.onrender.com/a2a/tasks/send`
+
+**`call_market_scout_a2a(query, session_id)`**
+- Sends an A2A task to Market Scout with the given query
+- Extracts and returns the text result from the response
+- 60-second timeout
+- Fails gracefully: returns empty string on any error (timeout, non-200, bad JSON,
+  missing fields) — the pipeline continues with empty research rather than crashing
+
+**`POST /api/research-a2a`**
+- Same request/response format as `/api/research`
+- Uses `call_market_scout_a2a()` for market research instead of internal Tavily searches
+- Existing `/api/research` endpoint is unchanged — Tavily research still works as before
+
+**OPIK instrumentation:**
+- A2A HTTP call tracked as a span with `name="a2a_research_call"`
+- Full pipeline tracked as a span with `name="a2a_pipeline"`
+- Use `_safe_track` wrapper — same pattern as all other spans
+
+**Critical rule:** if Market Scout is down or returns an error, the pipeline
+continues with empty research rather than crashing. Never let A2A failure
+propagate as an exception to the caller.
+
+---
+
 ## Backend — OPIK instrumentation
 
 OPIK is configured **entirely via environment variables**. Never call `opik.configure()` — it triggers an interactive TTY prompt that crashes on Render.

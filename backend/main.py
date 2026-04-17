@@ -23,6 +23,7 @@ from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 import opik
 from groq import Groq
+import httpx
 
 # Groq client — used for cheap fast guardrail checks
 # Free tier: ~14400 requests/day on llama-3.1-8b-instant
@@ -702,6 +703,35 @@ def research_initiative(session_id: str) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# A2A Client — Market Scout integration
+#
+# Sends a research query to Market Scout via the A2A protocol.
+# Returns the result text, or an empty string on any failure so the
+# pipeline can continue without research rather than crashing.
+# ---------------------------------------------------------------------------
+_A2A_TASK_ENDPOINT = "https://market-scout-405j.onrender.com/a2a/tasks/send"
+
+
+@_safe_track(name="a2a_research_call")
+def call_market_scout_a2a(query: str, session_id: str) -> str:
+    payload = {
+        "id": session_id,
+        "message": {
+            "role": "user",
+            "parts": [{"text": query}],
+        },
+    }
+    try:
+        response = httpx.post(_A2A_TASK_ENDPOINT, json=payload, timeout=60.0)
+        response.raise_for_status()
+        data = response.json()
+        return data["result"]["parts"][0]["text"]
+    except Exception as e:
+        print(f"WARNING: Market Scout A2A call failed: {e} — continuing with empty research")
+        return ""
+
+
 @_safe_track(name="clarification_questions")
 def track_clarification(session_id: str, message: str, history: list) -> str:
     lc_messages = [SystemMessage(content=ACTIVE_SYSTEM_PROMPT)] + build_lc_messages(history)
@@ -792,6 +822,37 @@ def generate_1pager_pipeline(session_id: str) -> str:
     return reply, research_summary, trace_id
 
 
+_A2A_GENERATION_PROMPT = (
+    "You are a PM 1-pager generator. Given a product initiative and market research, "
+    "generate a structured PM 1-pager immediately. Do not ask clarifying questions. "
+    "Generate the 1-pager now."
+)
+
+
+@_safe_track(name="a2a_pipeline")
+def generate_1pager_a2a_pipeline(session_id: str, query: str) -> tuple:
+    """TOP-LEVEL TRACE for the A2A research → generation pipeline."""
+    # Child span — A2A research call to Market Scout (fails gracefully)
+    research_summary = call_market_scout_a2a(query, session_id)
+    if not research_summary:
+        research_summary = ""
+
+    session_research[session_id] = research_summary
+
+    # Build messages directly — no clarification loop, no session history
+    messages = [
+        SystemMessage(content=_A2A_GENERATION_PROMPT),
+        HumanMessage(content=f"Initiative: {query}\n\nMarket Research:\n{research_summary}"),
+        HumanMessage(content="Generate the PM 1-pager now."),
+    ]
+    reply = invoke_with_backoff(messages)
+
+    trace_data = opik.opik_context.get_current_trace_data()
+    trace_id = trace_data.id if trace_data else None
+
+    return reply, research_summary, trace_id
+
+
 # ---------------------------------------------------------------------------
 # Request / Response models
 # ---------------------------------------------------------------------------
@@ -809,6 +870,11 @@ class ChatResponse(BaseModel):
 
 class ResearchRequest(BaseModel):
     session_id: str   # Must match an existing session
+
+
+class ResearchA2ARequest(BaseModel):
+    session_id: str   # Must match an existing session
+    query: str        # Research query sent to Market Scout via A2A
 
 
 class ResearchResponse(BaseModel):
@@ -952,6 +1018,47 @@ def research(request: ResearchRequest):
     session_documents[request.session_id] = reply
 
     print(f"DEBUG /research trace_id: {trace_id!r}")
+
+    return ResearchResponse(
+        reply=reply,
+        session_id=request.session_id,
+        is_complete=reply.strip().startswith("---"),
+        trace_id=trace_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# /research-a2a endpoint — same flow as /research but uses Market Scout
+# via A2A instead of internal Tavily searches.
+# If Market Scout is unreachable, the pipeline continues with empty research.
+# ---------------------------------------------------------------------------
+@router.post("/research-a2a", response_model=ResearchResponse)
+def research_a2a(request: ResearchA2ARequest):
+    if request.session_id not in sessions:
+        sessions[request.session_id] = []
+
+    history = sessions[request.session_id]
+    last_ready_idx = None
+    for i, msg in enumerate(history):
+        if msg.get("content") == "[READY_FOR_RESEARCH]":
+            last_ready_idx = i
+    if last_ready_idx is not None:
+        sessions[request.session_id] = history[:last_ready_idx + 1]
+
+    try:
+        reply, research_summary, trace_id = generate_1pager_a2a_pipeline(request.session_id, request.query)
+    except Exception as e:
+        err = str(e).lower()
+        if "api key" in err or "credential" in err or "authentication" in err:
+            raise HTTPException(status_code=401, detail="Invalid ANTHROPIC_API_KEY.")
+        if "quota" in err or "429" in err or "rate" in err or "overloaded" in err:
+            raise HTTPException(status_code=429, detail="Anthropic rate limit hit.")
+        raise HTTPException(status_code=503, detail=f"Could not reach Anthropic API: {e}")
+
+    sessions[request.session_id].append({"role": "assistant", "content": reply})
+    session_documents[request.session_id] = reply
+
+    print(f"DEBUG /research-a2a trace_id: {trace_id!r}")
 
     return ResearchResponse(
         reply=reply,
