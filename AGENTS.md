@@ -104,6 +104,20 @@ research agent via the A2A protocol instead of running its own Tavily searches.
 continues with empty research rather than crashing. Never let A2A failure
 propagate as an exception to the caller.
 
+**Production status:**
+- A2A pipeline tested end-to-end in production — working correctly
+- `/api/research-a2a` is live at `https://pm-1pager-generator.onrender.com/api/research-a2a`
+
+**Known gotcha — clarification loop bypass:**
+The endpoint must seed the query as the first user message AND append
+`{"role": "assistant", "content": "[READY_FOR_RESEARCH]"}` to the session
+history before calling generation — otherwise Claude enters the clarification
+loop instead of generating.
+
+`generate_1pager_a2a_pipeline()` bypasses `track_1pager_generation()` entirely
+and calls the LLM directly with a generation-specific system prompt — this
+avoids the clarification loop in the main system prompt.
+
 ---
 
 ## Backend — OPIK instrumentation
