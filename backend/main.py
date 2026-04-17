@@ -1064,7 +1064,7 @@ def research_a2a(request: ResearchA2ARequest):
     return ResearchResponse(
         reply=reply,
         session_id=request.session_id,
-        is_complete=reply.strip().startswith("---"),
+        is_complete=True,
         trace_id=trace_id,
     )
 
