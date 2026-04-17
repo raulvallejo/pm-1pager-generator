@@ -22,6 +22,23 @@ The answer was yes.
 
 ---
 
+## Architecture
+
+The 1-Pager Generator uses a **multi-agent architecture**. Rather than running web searches internally, it delegates all market research to **Market Scout** — a separate ReAct research agent — via [Google's A2A protocol](https://google.github.io/A2A/).
+
+Market Scout autonomously searches the web using the ReAct pattern (Reason + Act) and returns structured research. The 1-Pager Generator takes that research and uses Claude Haiku to generate the final document.
+
+```
+User → PM 1-Pager Generator → A2A → Market Scout (ReAct + Tavily) → research → Claude Haiku → 1-pager
+```
+
+**Market Scout links:**
+- Live demo: [market-scout-gamma.vercel.app](https://market-scout-gamma.vercel.app)
+- GitHub: [github.com/raulvallejo/market-scout](https://github.com/raulvallejo/market-scout)
+- A2A Agent Card: [market-scout-405j.onrender.com/.well-known/agent.json](https://market-scout-405j.onrender.com/.well-known/agent.json)
+
+---
+
 ## How it works
 
 1. **Describe your initiative** — tell the agent what you're building in plain language

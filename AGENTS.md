@@ -107,6 +107,9 @@ propagate as an exception to the caller.
 **Production status:**
 - A2A pipeline tested end-to-end in production — working correctly
 - `/api/research-a2a` is live at `https://pm-1pager-generator.onrender.com/api/research-a2a`
+- Frontend updated — `triggerResearch` in `frontend/src/api/client.js` now calls `/api/research-a2a` instead of `/api/research`
+- The 1-Pager Generator UI now uses Market Scout via A2A as the sole research source — Tavily internal research is no longer called from the frontend
+- `/api/research` endpoint still exists as a fallback but is not used by the UI
 
 **Known gotcha — clarification loop bypass:**
 The endpoint must seed the query as the first user message AND append

@@ -51,7 +51,7 @@ export async function chatWithAgent(sessionId, message) {
  * @returns {Promise<{reply: string, sessionId: string, isComplete: boolean}>}
  */
 export async function triggerResearch(sessionId) {
-  const response = await fetch(`${BASE_URL}/api/research`, {
+  const response = await fetch(`${BASE_URL}/api/research-a2a`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: sessionId }),
