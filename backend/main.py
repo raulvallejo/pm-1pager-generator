@@ -874,7 +874,7 @@ class ResearchRequest(BaseModel):
 
 class ResearchA2ARequest(BaseModel):
     session_id: str   # Must match an existing session
-    query: str        # Research query sent to Market Scout via A2A
+    query: str = ""   # Research query sent to Market Scout via A2A
 
 
 class ResearchResponse(BaseModel):
@@ -1046,7 +1046,8 @@ def research_a2a(request: ResearchA2ARequest):
         sessions[request.session_id] = history[:last_ready_idx + 1]
 
     try:
-        reply, research_summary, trace_id = generate_1pager_a2a_pipeline(request.session_id, request.query)
+        query = request.query or (sessions[request.session_id][0]["content"] if sessions.get(request.session_id) else "")
+        reply, research_summary, trace_id = generate_1pager_a2a_pipeline(request.session_id, query)
     except Exception as e:
         err = str(e).lower()
         if "api key" in err or "credential" in err or "authentication" in err:
