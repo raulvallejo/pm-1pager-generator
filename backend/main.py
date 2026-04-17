@@ -825,7 +825,25 @@ def generate_1pager_pipeline(session_id: str) -> str:
 _A2A_GENERATION_PROMPT = (
     "You are a PM 1-pager generator. Given a product initiative and market research, "
     "generate a structured PM 1-pager immediately. Do not ask clarifying questions. "
-    "Generate the 1-pager now."
+    "Generate the 1-pager now.\n\n"
+    "You MUST use exactly this markdown format — no deviations:\n\n"
+    "---\n"
+    "## [Initiative Title]\n\n"
+    "### Problem Statement\n"
+    "[content]\n\n"
+    "### Opportunity\n"
+    "[content]\n\n"
+    "### Target Market\n"
+    "[content]\n\n"
+    "### Solution\n"
+    "[content]\n\n"
+    "### Key Features\n"
+    "[content]\n\n"
+    "### Success Metrics\n"
+    "[content]\n\n"
+    "### Next Steps\n"
+    "[content]\n"
+    "---"
 )
 
 

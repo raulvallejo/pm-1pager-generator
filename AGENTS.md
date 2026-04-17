@@ -121,6 +121,12 @@ loop instead of generating.
 and calls the LLM directly with a generation-specific system prompt — this
 avoids the clarification loop in the main system prompt.
 
+**Known gotcha — query field is optional:**
+`/api/research-a2a` receives only `session_id` from the frontend — `query` is extracted from the first user message in `sessions[session_id]`. The `query` field in `ResearchA2ARequest` is optional (`default=""`) for this reason.
+
+**Known gotcha — A2A generation prompt must specify exact markdown format:**
+`_A2A_GENERATION_PROMPT` must explicitly require the format `parse_1pager()` expects: `---` delimiters, `## ` for the title, `### ` for each section heading. Without this, Claude outputs free-form markdown that `parse_1pager()` cannot parse, resulting in blank or broken PDF and docx downloads.
+
 ---
 
 ## Backend — OPIK instrumentation
