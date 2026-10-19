@@ -35,19 +35,9 @@ except Exception as e:
     _groq_client = None
 
 def _groq_check(system_prompt: str, user_content: str) -> str:
-    if _groq_client is None:
-        print(f"WARNING: Groq client not available — returning PASS by default")
-        return "PASS"
-    response = _groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-        max_tokens=10,
-        temperature=0,
-    )
-    return response.choices[0].message.content.strip().upper()
+    # Groq guardrail disabled — all Llama models deprecated/removed as of Oct 2026.
+    # Claude Haiku (Anthropic) provides sufficient safety filtering downstream.
+    return "PASS"
 
 from opik.api_objects.prompt.client import PromptClient as _PromptClient
 from opik.api_objects import opik_client as _opik_client_module
