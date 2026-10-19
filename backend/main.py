@@ -26,7 +26,7 @@ from groq import Groq
 import httpx
 
 # Groq client — used for cheap fast guardrail checks
-# Free tier: ~14400 requests/day on llama-3.1-8b-instant
+# Free tier: ~14400 requests/day on openai/gpt-oss-20b
 try:
     _groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
     print("Groq client initialized successfully")
@@ -39,7 +39,7 @@ def _groq_check(system_prompt: str, user_content: str) -> str:
         print(f"WARNING: Groq client not available — returning PASS by default")
         return "PASS"
     response = _groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model="openai/gpt-oss-20b",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
