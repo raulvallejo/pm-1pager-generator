@@ -39,7 +39,7 @@ def _groq_check(system_prompt: str, user_content: str) -> str:
         print(f"WARNING: Groq client not available — returning PASS by default")
         return "PASS"
     response = _groq_client.chat.completions.create(
-        model="qwen/qwen3-8b",
+        model="llama-3.1-8b-instant",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
